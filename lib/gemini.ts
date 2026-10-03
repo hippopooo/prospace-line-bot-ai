@@ -1,20 +1,31 @@
-import { ApiError, FinishReason, GenerateContentResponse, GoogleGenAI, ThinkingLevel } from '@google/genai';
+import {
+  ApiError,
+  FinishReason,
+  GenerateContentResponse,
+  GoogleGenAI,
+  ThinkingConfig,
+  ThinkingLevel,
+} from '@google/genai';
 import { DEFAULT_REPLY } from './messages';
 
 export const GEMINI_MODEL = 'gemini-3.5-flash';
+// Used when GEMINI_MODEL is overloaded (503/500/429) or too slow.
+export const GEMINI_FALLBACK_MODEL = 'gemini-2.5-flash';
 
 const TEMPERATURE = 1.0;
 const MAX_OUTPUT_TOKENS = 1024;
-// Default (high) thinking routinely exceeds the 7s budget; FAQ lookup only needs light reasoning.
-const THINKING_LEVEL = ThinkingLevel.LOW;
+// Default (high) thinking routinely exceeds the time budget; FAQ lookup only needs light reasoning.
+const PRIMARY_THINKING: ThinkingConfig = { thinkingLevel: ThinkingLevel.MINIMAL };
+// Gemini 2.5 uses a token budget instead of levels; 0 disables thinking.
+const FALLBACK_THINKING: ThinkingConfig = { thinkingBudget: 0 };
 
-// Transient overload errors (e.g. 503 "high demand") usually fail fast, so retry within the time budget.
-const RETRYABLE_STATUS = new Set([500, 503]);
-const MAX_ATTEMPTS = 3;
-const RETRY_DELAY_MS = 300;
-// Don't start a retry with less time than this left.
-const MIN_RETRY_MS = 2_000;
 export const GEMINI_TIMEOUT_MS = 7_000;
+// Give the primary model this long before switching to the fallback.
+const PRIMARY_TIMEOUT_MS = 4_000;
+// Don't start the fallback with less time than this left.
+const MIN_FALLBACK_MS = 2_000;
+// API errors worth trying on another model; others (bad key, bad request) would fail there too.
+const FALLBACK_STATUS = new Set([429, 500, 503]);
 
 const SYSTEM_INSTRUCTION = `<role>
 คุณคือ "ProSpace Bot" ผู้ช่วยแอดมินของทีม ProSpace จากบริษัท Mplus ผู้ให้บริการด้านไอทีและความปลอดภัยไอทีสำหรับองค์กร
@@ -49,15 +60,20 @@ function getClient(): GoogleGenAI {
   return client;
 }
 
-async function generateOnce(contents: string, timeoutMs: number): Promise<GenerateContentResponse> {
+async function generateOnce(
+  model: string,
+  thinkingConfig: ThinkingConfig,
+  contents: string,
+  timeoutMs: number,
+): Promise<GenerateContentResponse> {
   const request = getClient().models.generateContent({
-    model: GEMINI_MODEL,
+    model,
     contents,
     config: {
       systemInstruction: SYSTEM_INSTRUCTION,
       temperature: TEMPERATURE,
       maxOutputTokens: MAX_OUTPUT_TOKENS,
-      thinkingConfig: { thinkingLevel: THINKING_LEVEL },
+      thinkingConfig,
       abortSignal: AbortSignal.timeout(timeoutMs),
     },
   });
@@ -86,24 +102,37 @@ ${userMessage}
   const startedAt = Date.now();
   const deadline = startedAt + timeoutMs;
   try {
-    let response: GenerateContentResponse | undefined;
-    for (let attempt = 1; !response; attempt++) {
-      try {
-        response = await generateOnce(contents, deadline - Date.now());
-      } catch (err) {
-        const retryable = err instanceof ApiError && RETRYABLE_STATUS.has(err.status);
-        const remaining = deadline - Date.now() - RETRY_DELAY_MS;
-        if (!retryable || attempt >= MAX_ATTEMPTS || remaining < MIN_RETRY_MS) {
-          throw err;
-        }
-        console.warn('[GEMINI] retrying after error:', { attempt, status: err.status, remainingMs: remaining });
-        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+    let model = GEMINI_MODEL;
+    let response: GenerateContentResponse;
+    try {
+      response = await generateOnce(
+        model,
+        PRIMARY_THINKING,
+        contents,
+        Math.min(PRIMARY_TIMEOUT_MS, deadline - Date.now()),
+      );
+    } catch (err) {
+      // Timeouts and network errors are not ApiErrors and are worth a fallback too.
+      const canFallback = !(err instanceof ApiError) || FALLBACK_STATUS.has(err.status);
+      const remaining = deadline - Date.now();
+      if (!canFallback || remaining < MIN_FALLBACK_MS) {
+        throw err;
       }
+      console.warn('[GEMINI] primary failed, switching to fallback:', {
+        model: GEMINI_MODEL,
+        fallback: GEMINI_FALLBACK_MODEL,
+        status: err instanceof ApiError ? err.status : undefined,
+        error: err instanceof Error ? err.message : String(err),
+        remainingMs: remaining,
+      });
+      model = GEMINI_FALLBACK_MODEL;
+      response = await generateOnce(model, FALLBACK_THINKING, contents, remaining);
     }
 
     const candidate = response.candidates?.[0];
     const finishReason = candidate?.finishReason;
     console.log('[GEMINI]', {
+      model,
       ms: Date.now() - startedAt,
       finishReason,
       thoughtsTokenCount: response.usageMetadata?.thoughtsTokenCount,
