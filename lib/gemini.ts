@@ -1,10 +1,12 @@
-import { FinishReason, GoogleGenAI } from '@google/genai';
+import { FinishReason, GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { DEFAULT_REPLY } from './messages';
 
 export const GEMINI_MODEL = 'gemini-3.5-flash';
 
 const TEMPERATURE = 1.0;
 const MAX_OUTPUT_TOKENS = 1024;
+// Default (high) thinking routinely exceeds the 7s budget; FAQ lookup only needs light reasoning.
+const THINKING_LEVEL = ThinkingLevel.LOW;
 export const GEMINI_TIMEOUT_MS = 7_000;
 
 const SYSTEM_INSTRUCTION = `<role>
@@ -62,6 +64,7 @@ ${userMessage}
         systemInstruction: SYSTEM_INSTRUCTION,
         temperature: TEMPERATURE,
         maxOutputTokens: MAX_OUTPUT_TOKENS,
+        thinkingConfig: { thinkingLevel: THINKING_LEVEL },
         abortSignal: AbortSignal.timeout(timeoutMs),
       },
     });
