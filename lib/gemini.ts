@@ -1,4 +1,4 @@
-import { FinishReason, GoogleGenAI, ThinkingLevel } from '@google/genai';
+import { ApiError, FinishReason, GenerateContentResponse, GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { DEFAULT_REPLY } from './messages';
 
 export const GEMINI_MODEL = 'gemini-3.5-flash';
@@ -7,6 +7,13 @@ const TEMPERATURE = 1.0;
 const MAX_OUTPUT_TOKENS = 1024;
 // Default (high) thinking routinely exceeds the 7s budget; FAQ lookup only needs light reasoning.
 const THINKING_LEVEL = ThinkingLevel.LOW;
+
+// Transient overload errors (e.g. 503 "high demand") usually fail fast, so retry within the time budget.
+const RETRYABLE_STATUS = new Set([500, 503]);
+const MAX_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 300;
+// Don't start a retry with less time than this left.
+const MIN_RETRY_MS = 2_000;
 export const GEMINI_TIMEOUT_MS = 7_000;
 
 const SYSTEM_INSTRUCTION = `<role>
@@ -42,6 +49,27 @@ function getClient(): GoogleGenAI {
   return client;
 }
 
+async function generateOnce(contents: string, timeoutMs: number): Promise<GenerateContentResponse> {
+  const request = getClient().models.generateContent({
+    model: GEMINI_MODEL,
+    contents,
+    config: {
+      systemInstruction: SYSTEM_INSTRUCTION,
+      temperature: TEMPERATURE,
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
+      thinkingConfig: { thinkingLevel: THINKING_LEVEL },
+      abortSignal: AbortSignal.timeout(timeoutMs),
+    },
+  });
+
+  // Race against a timer as well, in case the abort signal is not honored.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timeout after ${timeoutMs}ms`)), timeoutMs);
+  });
+  return Promise.race([request, timeout]).finally(() => clearTimeout(timer));
+}
+
 export async function askGemini(
   faqCsv: string,
   userMessage: string,
@@ -56,25 +84,22 @@ ${userMessage}
 </question>`;
 
   const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
   try {
-    const request = getClient().models.generateContent({
-      model: GEMINI_MODEL,
-      contents,
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-        temperature: TEMPERATURE,
-        maxOutputTokens: MAX_OUTPUT_TOKENS,
-        thinkingConfig: { thinkingLevel: THINKING_LEVEL },
-        abortSignal: AbortSignal.timeout(timeoutMs),
-      },
-    });
-
-    // Race against a timer as well, in case the abort signal is not honored.
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`timeout after ${timeoutMs}ms`)), timeoutMs);
-    });
-    const response = await Promise.race([request, timeout]).finally(() => clearTimeout(timer));
+    let response: GenerateContentResponse | undefined;
+    for (let attempt = 1; !response; attempt++) {
+      try {
+        response = await generateOnce(contents, deadline - Date.now());
+      } catch (err) {
+        const retryable = err instanceof ApiError && RETRYABLE_STATUS.has(err.status);
+        const remaining = deadline - Date.now() - RETRY_DELAY_MS;
+        if (!retryable || attempt >= MAX_ATTEMPTS || remaining < MIN_RETRY_MS) {
+          throw err;
+        }
+        console.warn('[GEMINI] retrying after error:', { attempt, status: err.status, remainingMs: remaining });
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+      }
+    }
 
     const candidate = response.candidates?.[0];
     const finishReason = candidate?.finishReason;
