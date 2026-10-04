@@ -1,5 +1,6 @@
 import { HTTPFetchError, messagingApi, validateSignature, webhook } from '@line/bot-sdk';
 import { GEMINI_TIMEOUT_MS, askGemini } from '@/lib/gemini';
+import { appendHistory, getHistory } from '@/lib/history';
 import { CONTACT_RECEIVED_REPLY, DEFAULT_REPLY, GREETING } from '@/lib/messages';
 import { getFaqCsv } from '@/lib/sheet';
 
@@ -43,8 +44,8 @@ async function reply(replyToken: string, text: string): Promise<void> {
   }
 }
 
-async function answerText(text: string, startedAt: number): Promise<string> {
-  const faq = await getFaqCsv();
+async function answerText(text: string, userId: string | undefined, startedAt: number): Promise<string> {
+  const [faq, history] = await Promise.all([getFaqCsv(), getHistory(userId)]);
   if (faq === null) {
     return DEFAULT_REPLY;
   }
@@ -55,7 +56,7 @@ async function answerText(text: string, startedAt: number): Promise<string> {
     console.warn('[GEMINI] skipped, time budget exhausted:', { remainingMs: remaining });
     return DEFAULT_REPLY;
   }
-  return askGemini(faq, text, geminiTimeout);
+  return askGemini(faq, text, history, geminiTimeout);
 }
 
 async function handleEvent(event: webhook.Event, startedAt: number): Promise<void> {
@@ -79,13 +80,16 @@ async function handleEvent(event: webhook.Event, startedAt: number): Promise<voi
   }
 
   const text = event.message.text;
+  const userId = event.source?.userId;
+  let answer: string;
   if (hasPhoneNumber(text)) {
-    console.log('[CALLBACK_REQUEST]', event.source?.userId, text);
-    await reply(event.replyToken, CONTACT_RECEIVED_REPLY);
-    return;
+    console.log('[CALLBACK_REQUEST]', userId, text);
+    answer = CONTACT_RECEIVED_REPLY;
+  } else {
+    answer = await answerText(text, userId, startedAt);
   }
 
-  await reply(event.replyToken, await answerText(text, startedAt));
+  await Promise.all([reply(event.replyToken, answer), appendHistory(userId, text, answer)]);
 }
 
 export async function POST(req: Request): Promise<Response> {
