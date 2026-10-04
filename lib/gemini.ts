@@ -18,7 +18,8 @@ const TEMPERATURE = 1.0;
 const MAX_OUTPUT_TOKENS = 1024;
 // Default (high) thinking routinely exceeds the time budget; FAQ lookup only needs light reasoning.
 const PRIMARY_THINKING: ThinkingConfig = { thinkingLevel: ThinkingLevel.MINIMAL };
-const FALLBACK_THINKING: ThinkingConfig = { thinkingLevel: ThinkingLevel.MINIMAL };
+// gemini-3.8-flash rejects MINIMAL with a 400; LOW is its lightest level.
+const FALLBACK_THINKING: ThinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
 
 export const GEMINI_TIMEOUT_MS = 7_000;
 // Give the primary model this long before switching to the fallback.
