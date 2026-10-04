@@ -9,21 +9,23 @@ import {
 import type { ChatTurn } from './history';
 import { DEFAULT_REPLY } from './messages';
 
-export const GEMINI_MODEL = 'gemini-3.5-flash';
+// gemini-3.5-flash kept timing out (>4s even at MINIMAL thinking); 3.8-flash answered in ~2.7s at half the price.
+export const GEMINI_MODEL = 'gemini-3.8-flash';
 // Used when GEMINI_MODEL is overloaded (503/500/429) or too slow.
-// gemini-2.5-flash is closed to new API users; this is the replacement Google's 404 points to.
-export const GEMINI_FALLBACK_MODEL = 'gemini-3.8-flash';
+export const GEMINI_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
 
 const TEMPERATURE = 1.0;
 const MAX_OUTPUT_TOKENS = 1024;
 // Default (high) thinking routinely exceeds the time budget; FAQ lookup only needs light reasoning.
-const PRIMARY_THINKING: ThinkingConfig = { thinkingLevel: ThinkingLevel.MINIMAL };
 // gemini-3.8-flash rejects MINIMAL with a 400; LOW is its lightest level.
-const FALLBACK_THINKING: ThinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+const PRIMARY_THINKING: ThinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+// Supported thinking levels for flash-lite are unverified, so leave it on the model default
+// rather than risk a 400 in the path that is supposed to rescue failures.
+const FALLBACK_THINKING: ThinkingConfig | undefined = undefined;
 
 export const GEMINI_TIMEOUT_MS = 7_000;
 // Give the primary model this long before switching to the fallback.
-const PRIMARY_TIMEOUT_MS = 4_000;
+const PRIMARY_TIMEOUT_MS = 5_000;
 // Don't start the fallback with less time than this left.
 const MIN_FALLBACK_MS = 2_000;
 // API errors worth trying on another model; others (bad key, bad request) would fail there too.
@@ -78,7 +80,7 @@ function getClient(): GoogleGenAI {
 
 async function generateOnce(
   model: string,
-  thinkingConfig: ThinkingConfig,
+  thinkingConfig: ThinkingConfig | undefined,
   contents: string,
   timeoutMs: number,
 ): Promise<GenerateContentResponse> {
@@ -160,6 +162,7 @@ ${userMessage}
 
     const candidate = response.candidates?.[0];
     const finishReason = candidate?.finishReason;
+    const text = response.text?.trim();
     console.log('[GEMINI]', {
       model,
       historyMessages: history.length,
@@ -168,6 +171,8 @@ ${userMessage}
       thoughtsTokenCount: response.usageMetadata?.thoughtsTokenCount,
       candidatesTokenCount: response.usageMetadata?.candidatesTokenCount,
       blockReason: response.promptFeedback?.blockReason,
+      // Enough of the reply to tell what the bot said when debugging from Vercel Logs.
+      replyPreview: text?.slice(0, 200),
     });
 
     if (finishReason === FinishReason.MAX_TOKENS) {
@@ -175,7 +180,6 @@ ${userMessage}
       return DEFAULT_REPLY;
     }
 
-    const text = response.text?.trim();
     if (!text) {
       console.warn('[GEMINI] empty or blocked response, using DEFAULT_REPLY');
       return DEFAULT_REPLY;
