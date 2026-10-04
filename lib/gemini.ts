@@ -161,6 +161,7 @@ ${userMessage}
     const finishReason = candidate?.finishReason;
     console.log('[GEMINI]', {
       model,
+      historyMessages: history.length,
       ms: Date.now() - startedAt,
       finishReason,
       thoughtsTokenCount: response.usageMetadata?.thoughtsTokenCount,

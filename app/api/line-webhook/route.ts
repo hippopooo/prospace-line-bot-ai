@@ -89,7 +89,12 @@ async function handleEvent(event: webhook.Event, startedAt: number): Promise<voi
     answer = await answerText(text, userId, startedAt);
   }
 
-  await Promise.all([reply(event.replyToken, answer), appendHistory(userId, text, answer)]);
+  // Don't remember fallback turns: a history full of DEFAULT_REPLY makes Gemini keep answering it.
+  const remember = answer !== DEFAULT_REPLY;
+  await Promise.all([
+    reply(event.replyToken, answer),
+    remember ? appendHistory(userId, text, answer) : Promise.resolve(),
+  ]);
 }
 
 export async function POST(req: Request): Promise<Response> {

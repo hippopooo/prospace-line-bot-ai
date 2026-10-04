@@ -33,7 +33,8 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 function keyFor(userId: string): string {
-  return `history:${userId}`;
+  // v2: drops histories saved before DEFAULT_REPLY turns were excluded.
+  return `history:v2:${userId}`;
 }
 
 export async function getHistory(userId: string | undefined): Promise<ChatTurn[]> {
