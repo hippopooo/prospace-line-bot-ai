@@ -11,14 +11,14 @@ import { DEFAULT_REPLY } from './messages';
 
 export const GEMINI_MODEL = 'gemini-3.5-flash';
 // Used when GEMINI_MODEL is overloaded (503/500/429) or too slow.
-export const GEMINI_FALLBACK_MODEL = 'gemini-2.5-flash';
+// gemini-2.5-flash is closed to new API users; this is the replacement Google's 404 points to.
+export const GEMINI_FALLBACK_MODEL = 'gemini-3.8-flash';
 
 const TEMPERATURE = 1.0;
 const MAX_OUTPUT_TOKENS = 1024;
 // Default (high) thinking routinely exceeds the time budget; FAQ lookup only needs light reasoning.
 const PRIMARY_THINKING: ThinkingConfig = { thinkingLevel: ThinkingLevel.MINIMAL };
-// Gemini 2.5 uses a token budget instead of levels; 0 disables thinking.
-const FALLBACK_THINKING: ThinkingConfig = { thinkingBudget: 0 };
+const FALLBACK_THINKING: ThinkingConfig = { thinkingLevel: ThinkingLevel.MINIMAL };
 
 export const GEMINI_TIMEOUT_MS = 7_000;
 // Give the primary model this long before switching to the fallback.
