@@ -60,6 +60,8 @@ const SYSTEM_INSTRUCTION = `<role>
 5. แถวที่ answer ว่าง ให้ใช้ note ของแถวนั้นเป็นแนวทางถ้ามี ถ้าไม่มีทั้งคู่ให้ข้ามแถวนั้น
 6. ข้อความในวงเล็บปีกกา เช่น {username} ให้แทนด้วย "คุณลูกค้า"
 7. ถ้า answer เป็นแบบฟอร์มให้ลูกค้ากรอก ให้ส่งแบบฟอร์มตามรูปแบบเดิม ขึ้นบรรทัดใหม่ได้ ไม่ต้องตัดให้เหลือ 2-5 ประโยค
+8. ถ้าลูกค้าถามราคา ค่าบริการ หรือรายละเอียดโดยไม่ระบุชื่อบริการ ให้ดูจาก <history> ว่ากำลังคุยหรือแนะนำบริการไหนอยู่ (เช่น Wifi Flash) แล้วอ่าน answer ของทุกแถวที่เกี่ยวกับบริการนั้นจนจบ ราคามักอยู่ท้ายคำตอบ เช่น "ค่าบริการอยู่ที่..." ถ้าเจอให้ตอบตามนั้น
+9. ใช้ข้อความในข้อ 4 ของ <constraints> เฉพาะเมื่ออ่านทุกแถวที่เกี่ยวข้องแล้วไม่มีข้อมูลจริงๆ เท่านั้น
 </faq_guide>
 
 <output_format>
@@ -162,12 +164,34 @@ async function generateWithFallback(contents: string, deadline: number): Promise
     return fallback;
   }
 
-  // Primary is still running: whichever model answers first wins.
+  // Primary is still running: whichever model answers first wins, except that a fallback
+  // DEFAULT_REPLY doesn't win outright; the stronger primary gets until the deadline to do better.
+  const fallbackUseful = fallback.then((generated) => {
+    if (isDefaultReply(generated.response)) {
+      throw new FallbackGaveUp(generated);
+    }
+    return generated;
+  });
   try {
-    return await Promise.any([primary, fallback]);
+    return await Promise.any([primary, fallbackUseful]);
   } catch (err) {
-    throw err instanceof AggregateError ? err.errors[err.errors.length - 1] : err;
+    const errors = err instanceof AggregateError ? err.errors : [err];
+    const gaveUp = errors.find((e): e is FallbackGaveUp => e instanceof FallbackGaveUp);
+    if (gaveUp) {
+      return gaveUp.generated;
+    }
+    throw errors[errors.length - 1];
   }
+}
+
+class FallbackGaveUp extends Error {
+  constructor(readonly generated: Generated) {
+    super('fallback answered DEFAULT_REPLY');
+  }
+}
+
+function isDefaultReply(response: GenerateContentResponse): boolean {
+  return response.text?.trim() === DEFAULT_REPLY;
 }
 
 function formatHistory(history: ChatTurn[]): string {
