@@ -9,16 +9,14 @@ import {
 import type { ChatTurn } from './history';
 import { DEFAULT_REPLY } from './messages';
 
-// gemini-3.5-flash kept timing out (>4s even at MINIMAL thinking); 3.8-flash answered in ~2.7s at half the price.
-export const GEMINI_MODEL = 'gemini-3.8-flash';
+export const GEMINI_MODEL = 'gemini-3.5-flash';
 // Used when GEMINI_MODEL is overloaded (503/500/429) or too slow.
 export const GEMINI_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
 
 const TEMPERATURE = 1.0;
 const MAX_OUTPUT_TOKENS = 1024;
 // Default (high) thinking routinely exceeds the time budget; FAQ lookup only needs light reasoning.
-// gemini-3.8-flash rejects MINIMAL with a 400; LOW is its lightest level.
-const PRIMARY_THINKING: ThinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+const PRIMARY_THINKING: ThinkingConfig = { thinkingLevel: ThinkingLevel.MINIMAL };
 // Supported thinking levels for flash-lite are unverified, so leave it on the model default
 // rather than risk a 400 in the path that is supposed to rescue failures.
 const FALLBACK_THINKING: ThinkingConfig | undefined = undefined;
