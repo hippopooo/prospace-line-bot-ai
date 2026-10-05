@@ -24,10 +24,10 @@ const PRIMARY_THINKING: ThinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
 const FALLBACK_THINKING: ThinkingConfig | undefined = undefined;
 
 export const GEMINI_TIMEOUT_MS = 7_000;
-// Give the primary model this long before switching to the fallback.
-const PRIMARY_TIMEOUT_MS = 5_000;
+// If the primary hasn't answered by then, start the fallback alongside it and take whichever answers first.
+const HEDGE_AFTER_MS = 3_500;
 // Don't start the fallback with less time than this left.
-const MIN_FALLBACK_MS = 2_000;
+const MIN_FALLBACK_MS = 1_500;
 // API errors worth trying on another model; others (bad key, bad request) would fail there too.
 const FALLBACK_STATUS = new Set([429, 500, 503]);
 
@@ -104,6 +104,74 @@ async function generateOnce(
   return Promise.race([request, timeout]).finally(() => clearTimeout(timer));
 }
 
+type Generated = { model: string; response: GenerateContentResponse };
+
+function generateWith(
+  model: string,
+  thinkingConfig: ThinkingConfig | undefined,
+  contents: string,
+  deadline: number,
+): Promise<Generated> {
+  return generateOnce(model, thinkingConfig, contents, deadline - Date.now()).then((response) => ({
+    model,
+    response,
+  }));
+}
+
+// Timeouts and network errors are not ApiErrors and are worth a fallback too.
+function canFallback(err: unknown): boolean {
+  return !(err instanceof ApiError) || FALLBACK_STATUS.has(err.status);
+}
+
+async function generateWithFallback(contents: string, deadline: number): Promise<Generated> {
+  const primary = generateWith(GEMINI_MODEL, PRIMARY_THINKING, contents, deadline);
+  const primaryOutcome = primary.then(
+    (value) => ({ ok: true as const, value }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+
+  let hedgeTimer: ReturnType<typeof setTimeout> | undefined;
+  const hedge = new Promise<null>((resolve) => {
+    hedgeTimer = setTimeout(() => resolve(null), HEDGE_AFTER_MS);
+  });
+  const first = await Promise.race([primaryOutcome, hedge]).finally(() => clearTimeout(hedgeTimer));
+
+  if (first?.ok) {
+    return first.value;
+  }
+  if (first && !canFallback(first.error)) {
+    throw first.error;
+  }
+
+  const remaining = deadline - Date.now();
+  if (remaining < MIN_FALLBACK_MS) {
+    if (first) {
+      throw first.error;
+    }
+    return primary;
+  }
+
+  console.warn('[GEMINI] starting fallback:', {
+    model: GEMINI_MODEL,
+    fallback: GEMINI_FALLBACK_MODEL,
+    reason: first ? 'primary failed' : `primary slower than ${HEDGE_AFTER_MS}ms`,
+    status: first?.error instanceof ApiError ? first.error.status : undefined,
+    error: first ? (first.error instanceof Error ? first.error.message : String(first.error)) : undefined,
+    remainingMs: remaining,
+  });
+  const fallback = generateWith(GEMINI_FALLBACK_MODEL, FALLBACK_THINKING, contents, deadline);
+  if (first) {
+    return fallback;
+  }
+
+  // Primary is still running: whichever model answers first wins.
+  try {
+    return await Promise.any([primary, fallback]);
+  } catch (err) {
+    throw err instanceof AggregateError ? err.errors[err.errors.length - 1] : err;
+  }
+}
+
 function formatHistory(history: ChatTurn[]): string {
   if (history.length === 0) {
     return '';
@@ -133,32 +201,7 @@ ${userMessage}
   const startedAt = Date.now();
   const deadline = startedAt + timeoutMs;
   try {
-    let model = GEMINI_MODEL;
-    let response: GenerateContentResponse;
-    try {
-      response = await generateOnce(
-        model,
-        PRIMARY_THINKING,
-        contents,
-        Math.min(PRIMARY_TIMEOUT_MS, deadline - Date.now()),
-      );
-    } catch (err) {
-      // Timeouts and network errors are not ApiErrors and are worth a fallback too.
-      const canFallback = !(err instanceof ApiError) || FALLBACK_STATUS.has(err.status);
-      const remaining = deadline - Date.now();
-      if (!canFallback || remaining < MIN_FALLBACK_MS) {
-        throw err;
-      }
-      console.warn('[GEMINI] primary failed, switching to fallback:', {
-        model: GEMINI_MODEL,
-        fallback: GEMINI_FALLBACK_MODEL,
-        status: err instanceof ApiError ? err.status : undefined,
-        error: err instanceof Error ? err.message : String(err),
-        remainingMs: remaining,
-      });
-      model = GEMINI_FALLBACK_MODEL;
-      response = await generateOnce(model, FALLBACK_THINKING, contents, remaining);
-    }
+    const { model, response } = await generateWithFallback(contents, deadline);
 
     const candidate = response.candidates?.[0];
     const finishReason = candidate?.finishReason;
